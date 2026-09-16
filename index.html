@@ -163,10 +163,13 @@ svg{display:block;}
 .plant-bar-fill{height:100%;border-radius:3px;background:var(--flow);}
 
 /* ---------- layout view (process flow) ---------- */
-.layout-grid{display:grid;grid-template-columns:1fr 300px;gap:16px;}
-.flow-card{padding:20px 8px;overflow-x:auto;}
+.layout-grid{display:grid;grid-template-columns:1fr 300px;gap:16px;align-items:start;}
+.flow-card{padding:20px 20px 4px;}
+#flowDiagram svg{display:block;width:100%;height:auto;margin:0 auto;}
 .flow-node{cursor:pointer;}
 .flow-node-label{font-family:var(--font-body);font-weight:600;}
+.flow-summary-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:10px;margin-top:8px;padding-top:16px;border-top:1px solid var(--border-soft);}
+.flow-summary-grid .drawer-kpi-value small{font-size:12px;color:var(--text-dim);font-weight:400;}
 .mini-map-card{padding:0;overflow:hidden;position:relative;z-index:1;}
 #miniMap{width:100%;height:160px;background:#0D1424;position:relative;z-index:1;}
 .leaflet-container{background:#0D1424;font-family:var(--font-body);z-index:1;}
@@ -472,11 +475,12 @@ tbody tr:hover{background:var(--surface-2);}
       <div class="layout-grid">
         <div class="card flow-card">
           <div id="flowDiagram"></div>
+          <div class="flow-summary-grid" id="flowSummary"></div>
         </div>
         <div style="display:flex;flex-direction:column;gap:16px;">
           <div class="card mini-map-card">
             <div id="miniMap"></div>
-            <div class="mini-map-label">Sabarmati WTP · Ahmedabad, Gujarat</div>
+            <div class="mini-map-label">Sabarmati WTP · Ahmedabad, Gujarat<br><span style="font-size:9.5px;">Tiles: Esri, HERE, Garmin, © <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener" style="color:inherit;">OpenStreetMap</a> contributors</span></div>
           </div>
           <div class="card">
             <div class="card-title">Process units</div>
@@ -1047,10 +1051,15 @@ let miniMap = null;
 function initMiniMap(){
   if(miniMap) return;
   miniMap = L.map('miniMap', { scrollWheelZoom:false, dragging:false, zoomControl:false, attributionControl:false }).setView([PLANT.lat, PLANT.lon], 12);
-  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 15, minZoom: 10 }).addTo(miniMap);
+  L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}', { maxZoom: 16, minZoom: 10 }).addTo(miniMap);
   const icon = L.divIcon({ className:'', html:'<div style="width:16px;height:16px;border-radius:50%;background:#22B8CF;box-shadow:0 0 0 4px rgba(34,184,207,0.3);"></div>', iconSize:[16,16], iconAnchor:[8,8] });
   L.marker([PLANT.lat, PLANT.lon], { icon, interactive:false }).addTo(miniMap);
   window.addEventListener('resize', ()=>{ if(miniMap) miniMap.invalidateSize(); });
+  let flowResizeTimer;
+  window.addEventListener('resize', ()=>{
+    clearTimeout(flowResizeTimer);
+    flowResizeTimer = setTimeout(()=>{ if(state.view==='gis') renderFlowDiagram(); }, 120);
+  });
 }
 function resizeMiniMapSoon(){
   requestAnimationFrame(()=>requestAnimationFrame(()=>{ if(miniMap) miniMap.invalidateSize(); }));
@@ -1058,25 +1067,56 @@ function resizeMiniMapSoon(){
 }
 
 function renderFlowDiagram(){
-  const nodeW = 148, nodeH = 92, gap = 46;
-  const totalW = LOCATIONS.length * nodeW + (LOCATIONS.length-1) * gap + 40;
-  const h = 180;
-  const y = h/2 - nodeH/2;
+  const n = LOCATIONS.length;
+  const nodeH = 96, gapX = 36, gapY = 54, minNodeW = 148, maxNodeW = 216, sidePad = 24;
+  const availW = Math.max((document.querySelector('.flow-card')?.clientWidth || 0) - sidePad*2, 320);
+
+  // pick as many columns as fit at the minimum node width, then stretch nodes
+  // to fill the row — this is what keeps the whole diagram inside the card
+  // (no horizontal scrolling) and avoids leftover blank space on the right.
+  let cols = n;
+  while(cols > 1 && (cols*minNodeW + (cols-1)*gapX) > availW) cols--;
+  const nodeW = Math.min(maxNodeW, Math.floor((availW - (cols-1)*gapX) / cols));
+  const rows = Math.ceil(n/cols);
+  const totalW = availW;
+  const totalH = rows*nodeH + (rows-1)*gapY + 8;
+
+  // lay nodes out in a snake (boustrophedon): even rows flow left-to-right,
+  // odd rows flow right-to-left, so the connector between rows stays short.
+  const pos = LOCATIONS.map((l,i)=>{
+    const row = Math.floor(i/cols);
+    const itemsInRow = Math.min(cols, n-row*cols);
+    const rowW = itemsInRow*nodeW + (itemsInRow-1)*gapX;
+    const rowX0 = (totalW-rowW)/2;
+    const posInRow = i - row*cols;
+    const visualCol = (row%2===0) ? posInRow : (itemsInRow-1-posInRow);
+    return { x: rowX0 + visualCol*(nodeW+gapX), y: 4 + row*(nodeH+gapY), row };
+  });
 
   let connectors = '';
   let nodes = '';
 
   LOCATIONS.forEach((l,i)=>{
-    const x = 20 + i*(nodeW+gap);
+    const {x,y,row} = pos[i];
     const color = statusColor(l.status);
     const selected = state.filter.type==='site' && state.filter.value===l.id;
 
-    if(i < LOCATIONS.length-1){
+    if(i < n-1){
+      const next = pos[i+1];
       const nextFault = l.status==='fault';
-      const cx1 = x+nodeW, cx2 = x+nodeW+gap, cy = y+nodeH/2;
-      const cls = nextFault ? '' : 'flow-line';
       const strokeColor = nextFault ? '#3A4867' : '#60A5FA';
-      connectors += `<line x1="${cx1}" y1="${cy}" x2="${cx2}" y2="${cy}" stroke="${strokeColor}" stroke-width="2.4" class="${cls}" opacity="${nextFault?0.5:0.8}" marker-end="url(#arrow)"/>`;
+      const cls = nextFault ? '' : 'flow-line';
+      const opacity = nextFault ? 0.5 : 0.8;
+      if(next.row === row){
+        const leftToRight = row%2===0;
+        const x1 = leftToRight ? x+nodeW : x;
+        const x2 = leftToRight ? next.x : next.x+nodeW;
+        const cy = y+nodeH/2;
+        connectors += `<line x1="${x1}" y1="${cy}" x2="${x2}" y2="${cy}" stroke="${strokeColor}" stroke-width="2.4" class="${cls}" opacity="${opacity}" marker-end="url(#arrow)"/>`;
+      } else {
+        const sx = x+nodeW/2, sy = y+nodeH, ex = next.x+nodeW/2, ey = next.y, midY = (sy+ey)/2;
+        connectors += `<path d="M${sx},${sy} C${sx},${midY} ${ex},${midY} ${ex},${ey}" fill="none" stroke="${strokeColor}" stroke-width="2.4" class="${cls}" opacity="${opacity}" marker-end="url(#arrow)"/>`;
+      }
     }
 
     nodes += `<g class="flow-node" data-loc="${l.id}">
@@ -1087,7 +1127,7 @@ function renderFlowDiagram(){
     </g>`;
   });
 
-  const svg = `<svg viewBox="0 0 ${totalW} ${h}" width="${totalW}" height="${h}" style="display:block;min-width:${totalW}px;">
+  const svg = `<svg viewBox="0 0 ${totalW} ${totalH}" width="${totalW}" height="${totalH}">
     <defs>
       <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
         <path d="M0,0 L10,5 L0,10 z" fill="#60A5FA"/>
@@ -1107,6 +1147,23 @@ function renderFlowDiagram(){
       openSiteDrawer(id);
     });
   });
+
+  renderFlowSummary();
+}
+
+function renderFlowSummary(){
+  const first = LOCATIONS[0], last = LOCATIONS[LOCATIONS.length-1];
+  const recovery = (last.gen/first.gen*100);
+  const counts = { online:0, warning:0, fault:0 };
+  LOCATIONS.forEach(l=> counts[l.status]++);
+  const attention = counts.warning + counts.fault;
+  document.getElementById('flowSummary').innerHTML = `
+    <div class="drawer-kpi"><div class="drawer-kpi-label">Raw intake</div><div class="drawer-kpi-value">${fmt(first.gen)} <small>MLD</small></div></div>
+    <div class="drawer-kpi"><div class="drawer-kpi-label">Treated output</div><div class="drawer-kpi-value">${fmt(last.gen)} <small>MLD</small></div></div>
+    <div class="drawer-kpi"><div class="drawer-kpi-label">Overall recovery</div><div class="drawer-kpi-value">${recovery.toFixed(1)}<small>%</small></div></div>
+    <div class="drawer-kpi"><div class="drawer-kpi-label">Stages online</div><div class="drawer-kpi-value" style="color:var(--success);">${counts.online}<small>/${LOCATIONS.length}</small></div></div>
+    <div class="drawer-kpi"><div class="drawer-kpi-label">Needs attention</div><div class="drawer-kpi-value" style="color:${attention>0?'var(--warning)':'var(--text)'};">${attention}<small> stage${attention===1?'':'s'}</small></div></div>
+  `;
 }
 
 function wrapLabel(name, xPos){
